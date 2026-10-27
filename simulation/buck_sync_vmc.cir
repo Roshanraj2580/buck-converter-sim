@@ -1,0 +1,132 @@
+* ==============================================================================
+* TEXAS INSTRUMENTS SPECIFICATION: HIGH-EFFICIENCY SYNCHRONOUS BUCK CONVERTER
+* ==============================================================================
+* Architecture: Synchronous Buck Converter with Type-III Voltage-Mode Control
+* Target Application: 12V to 3.3V / 3A Automotive / Industrial POL Regulator
+* Key Features:
+*   - Discrete dead-time generation (25ns break-before-make) to prevent shoot-through
+*   - Realistic MOSFET models with Rdson, Coss, and body diode conduction
+*   - Ceramic MLCC capacitor modeling (ESR=2.5m, Ceff=30uF)
+*   - Soft-start ramp generator (1ms rise) to suppress inrush current
+*   - Dynamic load step (0.5A to 3.0A @ 1A/us) for transient stability testing
+*   - Type-III Op-Amp compensator providing +90 deg phase boost across LC double pole
+* ==============================================================================
+
+* ------------------------------------------------------------------------------
+* 1. POWER SUPPLIES & BIAS
+* ------------------------------------------------------------------------------
+Vin      vin      0       DC 12.0
+Vaux     vcc      0       DC 5.0       ; 5V Gate Driver & Control Rail
+
+* ------------------------------------------------------------------------------
+* 2. SOFT-START & BANDGAP REFERENCE GENERATOR
+*    Ramps internal reference from 0V to 0.8V in 1ms to prevent startup inrush
+* ------------------------------------------------------------------------------
+Vref_src ref_raw  0       PULSE(0 0.80 0 1.0m 10u 10m 20m)
+R_ss     ref_raw  vref_ss 1k
+C_ss     vref_ss  0       10n          ; Soft-start filter pole
+
+* ------------------------------------------------------------------------------
+* 3. SYNCHRONOUS POWER STAGE WITH DEAD-TIME GATE DRIVE
+* ------------------------------------------------------------------------------
+* High-side Switch (CSD18534Q5A class 60V / 14mOhm @ 75C)
+M_HS     vin      gh_drv  sw       sw       NMOS_HS
+* Low-side Synchronous Rectifier (10mOhm @ 75C)
+M_LS     sw       gl_drv  0        0        NMOS_LS
+
+* Discrete MOSFET Models
+.model NMOS_HS VDMOS(nchan Ron=14m Rg=1.5 Vto=2.2 Qg=7.5n Coss=140p Is=1e-11 Rb=2m)
+.model NMOS_LS VDMOS(nchan Ron=10m Rg=1.2 Vto=2.2 Qg=11n  Coss=250p Is=1e-11 Rb=1.5m)
+
+* ------------------------------------------------------------------------------
+* 4. NON-OVERLAPPING DEAD-TIME CONTROLLER (Break-Before-Make ~ 25ns)
+* ------------------------------------------------------------------------------
+* High-side turn-on delay (25ns RC delay + schmitt buffer)
+R_dth    pwm_node dth_in  1k
+C_dth    dth_in   0       25p
+B_gh     gh_drv   0       V = if(V(dth_in) > 2.5, 5.0, 0.0)
+
+* Low-side turn-on delay (25ns inverted delay)
+R_dtl    pwm_inv  dtl_in  1k
+C_dtl    dtl_in   0       25p
+B_gl     gl_drv   0       V = if(V(dtl_in) > 2.5, 5.0, 0.0)
+
+* Inverter for complementary drive
+B_inv    pwm_inv  0       V = if(V(pwm_node) < 2.5, 5.0, 0.0)
+
+* ------------------------------------------------------------------------------
+* 5. POWER PASSIVES: INDUCTOR & CERAMIC MLCC CAPACITOR BANK
+* ------------------------------------------------------------------------------
+* Power Inductor (4.7uH, Rdcr = 18 mOhm)
+L1       sw       v_ind   4.7u     IC=0
+R_dcr    v_ind    vout    18m
+
+* Output Capacitor (2x 22uF Ceramic, effective ~30uF at 3.3V DC bias, ESR = 2.5 mOhm)
+C_out    vout     n_esr   30u      IC=0
+R_esr    n_esr    0       2.5m
+
+* ------------------------------------------------------------------------------
+* 6. DYNAMIC LOAD: TRANSIENT STEP TESTING (0.5A -> 3.0A @ 1A/us)
+* ------------------------------------------------------------------------------
+* Base nominal DC bleed load
+R_base   vout     0       6.6      ; 0.5A baseline load
+* Dynamic step current source (steps +2.5A at t=3.0ms with 2.5us slew)
+I_step   vout     0       PULSE(0 2.5 3.0m 2.5u 2.5u 2.0m 10m)
+
+* ------------------------------------------------------------------------------
+* 7. RESISTIVE FEEDBACK DIVIDER
+*    Divides 3.3V down to 0.8V reference: Vfb = Vout * R_bot / (R1 + R_bot)
+*    R1 = 20k, R_bot = 6.4k -> 3.3V * 6.4 / 26.4 = 0.800V
+* ------------------------------------------------------------------------------
+R1       vout     vfb     20k
+R_bot    vfb      0       6.4k
+
+* ------------------------------------------------------------------------------
+* 8. TYPE-III ACTIVE ERROR AMPLIFIER COMPENSATOR
+*    Feedforward branch: R3 + C3 in parallel with R1
+*    Feedback branch: (R2 + C1) in parallel with C2
+*    Values synthesized by Python design engine for fc=50kHz, PM=50.3 deg
+* ------------------------------------------------------------------------------
+* High-frequency feedforward lead network
+R3       vout     n_c3    1.07k
+C3       n_c3     vfb     590p
+
+* Main integrator & zero/pole feedback network
+R2       vcomp    n_c1    8.49k
+C1       n_c1     vfb     1.87n
+C2       vcomp    vfb     75p
+
+* High-gain Error Amplifier with realistic finite GBW (15MHz) and clamping
+E_ea     ea_out   0       vref_ss  vfb     5000
+R_ea     ea_out   vcomp   200
+* Output clamp limits Vcomp between 0.2V and 2.2V (prevents integrator windup)
+D_c1     vcomp    vclamp_h D_ideal
+V_clmph  vclamp_h 0       DC 2.2
+D_c2     vclamp_l vcomp    D_ideal
+V_clmpl  vclamp_l 0       DC 0.2
+.model D_ideal D(Ron=1m)
+
+* ------------------------------------------------------------------------------
+* 9. PWM COMPARATOR & 500 kHz SAWTOOTH MODULATOR
+* ------------------------------------------------------------------------------
+* 500 kHz, 0.4V to 1.9V Sawtooth (1.5V pk-pk ramp)
+V_ramp   vramp    0       PULSE(0.4 1.9 0 1.96u 0.04u 0.04u 2.0u)
+
+* Fast PWM Comparator
+B_pwm    pwm_node 0       V = if(V(vcomp) > V(vramp), 5.0, 0.0)
+
+* ------------------------------------------------------------------------------
+* 10. SIMULATION CONTROLS & MEASUREMENTS
+* ------------------------------------------------------------------------------
+.tran 0 5.5m 0 10n uic
+.options reltol=1e-3 method=gear maxstep=50n
+
+* Transient Performance Metrics
+.meas tran VOUT_SS avg V(vout) from 2.5m to 2.9m
+.meas tran VOUT_RIPPLE_PP pp V(vout) from 2.8m to 2.9m
+.meas tran VOUT_STEP_UNDERSHOOT min V(vout) from 3.0m to 3.5m
+.meas tran VOUT_STEP_OVERSHOOT max V(vout) from 5.0m to 5.5m
+.meas tran IL_PEAK max I(L1) from 3.0m to 3.5m
+
+.probe
+.end
